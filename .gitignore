@@ -36,8 +36,9 @@ components/**/__pycache__/
 # Working examples
 !intercom.yaml
 !intercom-mini.yaml
-!intercom-voice-pe.yaml
-!intercom-waveshare.yaml
+!intercom-kitchen.yaml
+!intercom-office.yaml
+!intercom-living-room.yaml
 
 # Documentation images
 !readme-img/
