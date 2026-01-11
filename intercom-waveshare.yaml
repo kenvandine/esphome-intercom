@@ -1,0 +1,408 @@
+# ==============================================================================
+# ESP32-S3 INTERCOM - Waveshare ESP32-S3-Touch-AMOLED-1.8
+# ==============================================================================
+#
+# Full-featured intercom device with 1.8" AMOLED touchscreen display.
+# Uses ES8311 audio codec for high-quality full-duplex audio on a single I2S bus.
+#
+# HARDWARE:
+#   - Board: ESP32-S3 (16MB Flash, 8MB Octal PSRAM)
+#   - Audio: ES8311 codec (I2C control + I2S audio on single bus)
+#   - Display: SH8601 1.8" AMOLED (368x448, QSPI interface)
+#   - Touch: FT3168 capacitive touch controller
+#   - Built-in microphone and speaker
+#
+# KEY FEATURES:
+#   - Uses i2s_audio_duplex for true full-duplex on single I2S bus
+#   - Large AMOLED touchscreen for call state and controls
+#   - Touch gestures for call/answer/hangup and contact selection
+#   - Software echo cancellation (esp_aec)
+#
+# ==============================================================================
+
+substitutions:
+  name: intercom-waveshare
+  friendly_name: Waveshare Intercom
+  p2p_port: "12345"
+  signaling_port: "12350"
+  signaling_broadcast: "192.168.1.255"
+
+# Include shared configurations
+packages:
+  waveshare: !include packages/waveshare_amoled_base.yaml
+  base: !include packages/intercom_base.yaml
+
+# ==============================================================================
+# CONTACTS - Configure your contacts here
+# Format: "Name|IP" - First entry should be HomeAssistant
+# ==============================================================================
+globals:
+  - id: static_contacts
+    type: std::array<const char*, 8>
+    restore_value: no
+    initial_value: '{
+      "HomeAssistant|192.168.1.10",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      ""
+    }'
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    priority: 600
+    then:
+      - light.turn_on:
+          id: backlight
+          brightness: 100%
+      - delay: 2s
+      - lambda: |-
+          // Extract HA IP from static_contacts[0] (format: "Name|IP")
+          if (id(static_contacts)[0] && id(static_contacts)[0][0]) {
+            std::string entry = id(static_contacts)[0];
+            size_t sep = entry.find('|');
+            if (sep != std::string::npos) {
+              id(ha_ip) = entry.substr(sep + 1);
+            }
+          }
+          // Restore speaker volume from saved state
+          float vol = 0.15 + (id(speaker_volume).state / 100.0) * 0.60;
+          id(es8311_dac).set_volume(vol);
+          // Restore mic gain from saved state
+          id(intercom).set_mic_gain((int)id(mic_gain).state);
+      # Resolve first contact at boot
+      - script.execute: resolve_selected_contact
+      # Initialize display to idle page
+      - script.execute: update_display_page
+
+esp32:
+  board: esp32-s3-devkitc-1
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_LWIP_MAX_SOCKETS: "16"
+    components:
+      - espressif/esp-sr^2.3.0
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+# ==============================================================================
+# CONNECTIVITY
+# ==============================================================================
+api:
+  id: api_server
+
+ota:
+  - platform: esphome
+
+web_server:
+  port: 80
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: INFO
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${name} Fallback"
+
+mdns:
+  services:
+    - service: "_intercom"
+      protocol: "_udp"
+      port: ${p2p_port}
+      txt:
+        device: ${name}
+
+# ==============================================================================
+# EXTERNAL COMPONENTS
+# ==============================================================================
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [intercom_audio, i2s_audio_duplex, esp_aec, mdns_discovery]
+
+# ==============================================================================
+# INTERCOM AUDIO
+# ==============================================================================
+intercom_audio:
+  id: intercom
+  duplex_id: i2s_duplex
+  listen_port: ${p2p_port}
+  remote_ip: !lambda 'return id(selected_ip).state;'
+  remote_port: !lambda 'return (uint16_t)id(selected_port).state;'
+  buffer_size: 8192
+  prebuffer_size: 2048
+  on_start:
+    - output.turn_on: speaker_enable
+    - lambda: 'id(call_state) = 3;'
+    - component.update: call_state_text
+  on_stop:
+    - output.turn_off: speaker_enable
+    - lambda: |-
+        if (id(call_state) == 3) {
+          std::string peer_ip = id(selected_ip).state;
+          if (!peer_ip.empty() && peer_ip != id(ha_ip)) {
+            auto ips = wifi::global_wifi_component->get_ip_addresses();
+            std::string our_ip = ips.empty() ? "" : ips[0].str();
+            id(signaling_msg) = "HANGUP:${name}:" + our_ip;
+          }
+        }
+        id(call_state) = 0;
+        id(caller_name) = "";
+        id(caller_ip) = "";
+    - script.execute: flush_signaling
+    - script.execute: resolve_selected_contact
+    - component.update: call_state_text
+
+# ==============================================================================
+# mDNS DISCOVERY
+# ==============================================================================
+mdns_discovery:
+  id: discovery
+  service_type: "_intercom._udp"
+  scan_interval: 30s
+  on_peer_found:
+    - logger.log:
+        format: "Peer found: %s (%s)"
+        args: ["name.c_str()", "ip.c_str()"]
+  on_peer_lost:
+    - logger.log:
+        format: "Peer lost: %s"
+        args: ["name.c_str()"]
+
+# ==============================================================================
+# EXTEND CALL STATE TEXT SENSOR
+# Triggers display page change when call_state changes
+# ==============================================================================
+text_sensor:
+  - id: !extend call_state_text
+    on_value:
+      then:
+        - script.execute: update_display_page
+
+# ==============================================================================
+# DISPLAY UPDATE SCRIPT
+# Called when call_state changes to switch display page
+# ==============================================================================
+script:
+  - id: update_display_page
+    mode: restart
+    then:
+      - lambda: |-
+          switch(id(call_state)) {
+            case 0: id(main_display).show_page(id(page_idle)); break;
+            case 1: id(main_display).show_page(id(page_ringing_in)); break;
+            case 2: id(main_display).show_page(id(page_ringing_out)); break;
+            case 3:
+            case 4: id(main_display).show_page(id(page_in_call)); break;
+          }
+      - component.update: main_display
+
+# ==============================================================================
+# DISPLAY REFRESH INTERVAL
+# Re-renders current page every 1s (for countdown, TX/RX stats)
+# ==============================================================================
+interval:
+  - interval: 1s
+    then:
+      - component.update: main_display
+
+# ==============================================================================
+# DISPLAY PAGES (override from base package)
+# Layout optimized for 368x448 portrait AMOLED
+# ==============================================================================
+display:
+  - id: !extend main_display
+    pages:
+      # ----------------------------------------------------------------------
+      # PAGE: IDLE - Black background (AMOLED power saving)
+      # ----------------------------------------------------------------------
+      - id: page_idle
+        lambda: |-
+          constexpr int w = 368;
+          constexpr int h = 448;
+          constexpr int cx = w / 2;  // 184
+
+          it.fill(id(color_black));
+
+          // Title
+          it.print(cx, 40, id(font_title), id(color_cyan), TextAlign::CENTER, "${friendly_name}");
+
+          // Divider line
+          it.horizontal_line(20, 80, w - 40, id(color_blue));
+
+          // Status
+          it.print(cx, 120, id(font_debug), id(color_white), TextAlign::CENTER, "Status");
+          it.print(cx, 160, id(font_state), id(color_green), TextAlign::CENTER, "IDLE");
+
+          // Selected contact
+          it.print(cx, 220, id(font_debug), id(color_white), TextAlign::CENTER, "Selected Contact");
+          std::string contact = id(selected_contact_text).state;
+          if (!contact.empty()) {
+            it.print(cx, 260, id(font_info), id(color_cyan), TextAlign::CENTER, contact.c_str());
+          }
+
+          // Divider
+          it.horizontal_line(20, 310, w - 40, id(color_blue));
+
+          // Footer info
+          char buf[32];
+          snprintf(buf, sizeof(buf), "WiFi: %.0f%%", id(wifi_pct).state);
+          it.print(cx, 350, id(font_debug), id(color_white), TextAlign::CENTER, buf);
+          it.print(cx, 380, id(font_debug), id(color_white), TextAlign::CENTER,
+                   id(node_status).state ? "Home Assistant: Connected" : "Home Assistant: --");
+
+          // Touch hint
+          it.print(cx, 430, id(font_debug), id(color_blue), TextAlign::CENTER, "Tap bottom to call | Top for next contact");
+
+      # ----------------------------------------------------------------------
+      # PAGE: RINGING_IN - Red accent, incoming call
+      # ----------------------------------------------------------------------
+      - id: page_ringing_in
+        lambda: |-
+          constexpr int w = 368;
+          constexpr int h = 448;
+          constexpr int cx = w / 2;
+
+          it.fill(id(color_black));
+
+          // Red header bar
+          it.filled_rectangle(0, 0, w, 100, id(color_red));
+          it.print(cx, 50, id(font_title), id(color_white), TextAlign::CENTER, "INCOMING CALL");
+
+          // Caller info
+          it.print(cx, 150, id(font_debug), id(color_white), TextAlign::CENTER, "Call from:");
+          std::string caller = id(caller_name);
+          if (!caller.empty()) {
+            it.print(cx, 200, id(font_state), id(color_cyan), TextAlign::CENTER, caller.c_str());
+          }
+
+          // Ringing animation (simple pulsing circle)
+          static int pulse = 0;
+          pulse = (pulse + 1) % 60;
+          int radius = 30 + (pulse < 30 ? pulse : 60 - pulse);
+          it.circle(cx, 300, radius, id(color_red));
+          it.circle(cx, 300, radius + 10, id(color_red));
+
+          // Action hint
+          it.filled_rectangle(0, h - 80, w, 80, id(color_green));
+          it.print(cx, h - 40, id(font_info), id(color_white), TextAlign::CENTER, "TAP TO ANSWER");
+
+      # ----------------------------------------------------------------------
+      # PAGE: RINGING_OUT - Orange accent, outgoing call
+      # ----------------------------------------------------------------------
+      - id: page_ringing_out
+        lambda: |-
+          constexpr int w = 368;
+          constexpr int h = 448;
+          constexpr int cx = w / 2;
+
+          it.fill(id(color_black));
+
+          // Orange header bar
+          it.filled_rectangle(0, 0, w, 100, id(color_orange));
+          it.print(cx, 50, id(font_title), id(color_white), TextAlign::CENTER, "CALLING...");
+
+          // Who we're calling
+          it.print(cx, 150, id(font_debug), id(color_white), TextAlign::CENTER, "Calling:");
+          std::string contact = id(selected_contact_text).state;
+          if (!contact.empty()) {
+            it.print(cx, 200, id(font_state), id(color_cyan), TextAlign::CENTER, contact.c_str());
+          }
+
+          // Waiting animation (dots)
+          static int dots = 0;
+          dots = (dots + 1) % 4;
+          std::string waiting = "Waiting for answer";
+          for (int i = 0; i < dots; i++) waiting += ".";
+          it.print(cx, 280, id(font_info), id(color_orange), TextAlign::CENTER, waiting.c_str());
+
+          // Cancel hint
+          it.filled_rectangle(0, h - 80, w, 80, id(color_red));
+          it.print(cx, h - 40, id(font_info), id(color_white), TextAlign::CENTER, "TAP TO CANCEL");
+
+      # ----------------------------------------------------------------------
+      # PAGE: IN_CALL - Green accent, active call
+      # ----------------------------------------------------------------------
+      - id: page_in_call
+        lambda: |-
+          constexpr int w = 368;
+          constexpr int h = 448;
+          constexpr int cx = w / 2;
+
+          it.fill(id(color_black));
+
+          // Green header bar
+          it.filled_rectangle(0, 0, w, 100, id(color_green));
+          it.print(cx, 50, id(font_title), id(color_white), TextAlign::CENTER, "IN CALL");
+
+          // Connected to
+          it.print(cx, 140, id(font_debug), id(color_white), TextAlign::CENTER, "Connected to:");
+          std::string contact = id(caller_name).empty() ? id(selected_contact_text).state : id(caller_name);
+          if (!contact.empty()) {
+            it.print(cx, 180, id(font_info), id(color_cyan), TextAlign::CENTER, contact.c_str());
+          }
+
+          // Stats
+          char buf[64];
+          snprintf(buf, sizeof(buf), "TX: %lu packets", (unsigned long)id(intercom).get_tx_packets());
+          it.print(cx, 240, id(font_debug), id(color_white), TextAlign::CENTER, buf);
+          snprintf(buf, sizeof(buf), "RX: %lu packets", (unsigned long)id(intercom).get_rx_packets());
+          it.print(cx, 270, id(font_debug), id(color_white), TextAlign::CENTER, buf);
+          snprintf(buf, sizeof(buf), "Buffer: %zu bytes", id(intercom).get_buffer_fill());
+          it.print(cx, 300, id(font_debug), id(color_white), TextAlign::CENTER, buf);
+
+          // Auto-hangup countdown
+          if (id(auto_hangup) && id(auto_hangup_remaining) > 0) {
+            snprintf(buf, sizeof(buf), "Auto hangup in: %ds", id(auto_hangup_remaining));
+            it.print(cx, 350, id(font_debug), id(color_yellow), TextAlign::CENTER, buf);
+          }
+
+          // Hangup hint
+          it.filled_rectangle(0, h - 80, w, 80, id(color_red));
+          it.print(cx, h - 40, id(font_info), id(color_white), TextAlign::CENTER, "TAP TO HANG UP");
+
+# ==============================================================================
+# SENSORS
+# ==============================================================================
+sensor:
+  - platform: intercom_audio
+    intercom_audio_id: intercom
+    tx_packets:
+      name: "TX Packets"
+      icon: "mdi:upload-network"
+    rx_packets:
+      name: "RX Packets"
+      icon: "mdi:download-network"
+    buffer_fill:
+      name: "Buffer Fill"
+      icon: "mdi:memory"
+
+  - platform: mdns_discovery
+    mdns_discovery_id: discovery
+    peer_count:
+      name: "Peer Count"
+      icon: "mdi:account-group"
+
+text_sensor:
+  # Discovered peers list
+  - platform: mdns_discovery
+    mdns_discovery_id: discovery
+    peers_list:
+      name: "Discovered Peers"
+      icon: "mdi:lan"

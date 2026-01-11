@@ -1,0 +1,324 @@
+# ==============================================================================
+# WAVESHARE AMOLED BASE PACKAGE
+# ==============================================================================
+# Hardware-specific configuration for Waveshare ESP32-S3-Touch-AMOLED-1.8.
+#
+# Hardware:
+#   - ESP32-S3 (16MB Flash, 8MB PSRAM)
+#   - ES8311 Audio Codec (I2S duplex on single bus)
+#   - 1.8" AMOLED Display (368x448, SH8601 controller, QSPI)
+#   - FT3168 Capacitive Touch Controller
+#   - Built-in microphone and speaker
+#
+# This device uses the i2s_audio_duplex component for full-duplex audio
+# on a single I2S bus (same as Xiaozhi Ball V3).
+#
+# ==============================================================================
+
+# ==============================================================================
+# I2C BUS (for ES8311 codec and touch controller)
+# ==============================================================================
+i2c:
+  sda: GPIO15
+  scl: GPIO14
+  scan: false
+
+# ==============================================================================
+# AUDIO CODEC (ES8311)
+# ==============================================================================
+audio_dac:
+  - platform: es8311
+    id: es8311_dac
+    bits_per_sample: 16bit
+    sample_rate: 16000
+
+# ==============================================================================
+# ECHO CANCELLATION
+# ==============================================================================
+esp_aec:
+  id: aec_component
+  sample_rate: 16000
+  filter_length: 4
+
+# ==============================================================================
+# I2S AUDIO DUPLEX (single bus for ES8311)
+# ES8311 shares I2S bus for both mic and speaker
+# ==============================================================================
+i2s_audio_duplex:
+  id: i2s_duplex
+  i2s_lrclk_pin: GPIO45
+  i2s_bclk_pin: GPIO9
+  i2s_mclk_pin: GPIO42
+  i2s_din_pin: GPIO10   # Mic data from ES8311
+  i2s_dout_pin: GPIO8   # Speaker data to ES8311
+  sample_rate: 16000
+  aec_id: aec_component
+
+# Speaker amplifier enable
+output:
+  - platform: gpio
+    id: speaker_enable
+    pin: GPIO46
+  - platform: ledc
+    id: backlight_output
+    pin:
+      number: GPIO38
+      ignore_strapping_warning: true
+    frequency: 1000Hz
+
+# ==============================================================================
+# DISPLAY (SH8601 QSPI AMOLED 368x448)
+# ==============================================================================
+spi:
+  - id: qspi_bus
+    type: quad
+    clk_pin: GPIO47
+    data_pins:
+      - GPIO18
+      - GPIO7
+      - GPIO48
+      - GPIO5
+
+display:
+  - platform: qspi_amoled
+    id: main_display
+    model: custom
+    dimensions:
+      width: 368
+      height: 448
+    cs_pin: GPIO6
+    reset_pin: GPIO17
+    brightness: 255
+    color_order: rgb
+    invert_colors: false
+    update_interval: never
+    # SH8601 initialization commands
+    init_sequence:
+      # Sleep out
+      - [0x11, 0]
+      - delay 120ms
+      # Display on
+      - [0x29, 0]
+    pages:
+      # Page definitions will be in the main YAML
+      - id: page_idle
+        lambda: |-
+          // Placeholder - defined in main YAML
+      - id: page_ringing_in
+        lambda: |-
+          // Placeholder
+      - id: page_ringing_out
+        lambda: |-
+          // Placeholder
+      - id: page_in_call
+        lambda: |-
+          // Placeholder
+
+# ==============================================================================
+# TOUCHSCREEN (FT3168)
+# ==============================================================================
+touchscreen:
+  - platform: ft5x06
+    id: touch_screen
+    interrupt_pin: GPIO12
+    reset_pin: GPIO13
+    address: 0x15
+    on_touch:
+      - lambda: |-
+          ESP_LOGD("touch", "Touch at (%d, %d)", touch.x, touch.y);
+
+# ==============================================================================
+# DISPLAY BACKLIGHT
+# ==============================================================================
+light:
+  - platform: monochromatic
+    id: backlight
+    name: "Display Backlight"
+    icon: "mdi:brightness-6"
+    output: backlight_output
+    restore_mode: ALWAYS_ON
+    default_transition_length: 250ms
+
+# ==============================================================================
+# STATUS LED (optional - check if device has one)
+# Using display backlight flash as status indicator if no dedicated LED
+# ==============================================================================
+  # Note: Waveshare AMOLED doesn't have a dedicated status LED
+  # Status is shown on the display instead
+
+# Dummy status_led light for compatibility with intercom_base.yaml
+# This creates a virtual light that doesn't control real hardware
+  - platform: binary
+    id: status_led
+    name: "Status LED (Virtual)"
+    output: status_led_output
+    internal: true
+    effects:
+      - strobe:
+          name: "Ringing"
+          colors:
+            - state: true
+              duration: 300ms
+            - state: false
+              duration: 300ms
+      - strobe:
+          name: "Calling"
+          colors:
+            - state: true
+              duration: 500ms
+            - state: false
+              duration: 500ms
+
+output:
+  - platform: template
+    id: status_led_output
+    type: binary
+    write_action:
+      - lambda: |-
+          // Virtual output - status shown on display instead
+          ESP_LOGV("status", "Status LED: %s", state ? "ON" : "OFF");
+
+# ==============================================================================
+# PHYSICAL CONTROLS
+# ==============================================================================
+binary_sensor:
+  # Touch input (tap on display acts as button)
+  - platform: touchscreen
+    touchscreen_id: touch_screen
+    id: touch_button
+    name: "Touch Button"
+    internal: true
+    x_min: 0
+    x_max: 368
+    y_min: 350
+    y_max: 448
+    on_press:
+      then:
+        - button.press: call_button
+
+  # Long touch for next contact (hold bottom of screen)
+  - platform: touchscreen
+    touchscreen_id: touch_screen
+    id: touch_long
+    internal: true
+    x_min: 0
+    x_max: 368
+    y_min: 0
+    y_max: 100
+    on_press:
+      then:
+        - button.press: next_contact_button
+
+# ==============================================================================
+# NUMBER CONTROLS
+# ==============================================================================
+number:
+  # Speaker volume with ES8311 integration
+  - platform: template
+    id: speaker_volume
+    name: "Speaker Volume"
+    icon: "mdi:volume-high"
+    min_value: 0
+    max_value: 100
+    step: 5
+    initial_value: 50
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "%"
+    set_action:
+      - lambda: |-
+          float vol = 0.15 + (x / 100.0) * 0.60;
+          id(es8311_dac).set_volume(vol);
+
+  # Microphone gain (amplification during 32->16 bit conversion)
+  - platform: template
+    id: mic_gain
+    name: "Microphone Gain"
+    icon: "mdi:microphone"
+    min_value: 1
+    max_value: 16
+    step: 1
+    initial_value: 4
+    optimistic: true
+    restore_value: true
+    set_action:
+      - lambda: 'id(intercom).set_mic_gain((int)x);'
+
+# ==============================================================================
+# SWITCH CONTROLS
+# ==============================================================================
+switch:
+  # Echo cancellation toggle
+  - platform: i2s_audio_duplex
+    i2s_audio_duplex_id: i2s_duplex
+    aec:
+      name: "Echo Cancellation"
+      icon: "mdi:ear-hearing"
+
+# ==============================================================================
+# FONTS (for display)
+# Larger fonts for the bigger display
+# ==============================================================================
+font:
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: 700
+    id: font_title
+    size: 32
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: 500
+    id: font_state
+    size: 36
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: 400
+    id: font_info
+    size: 24
+  - file:
+      type: gfonts
+      family: Roboto Mono
+      weight: 400
+    id: font_debug
+    size: 16
+
+# ==============================================================================
+# COLORS (for AMOLED display)
+# Pure black background for AMOLED power savings
+# ==============================================================================
+color:
+  - id: color_white
+    red: 100%
+    green: 100%
+    blue: 100%
+  - id: color_black
+    red: 0%
+    green: 0%
+    blue: 0%
+  - id: color_red
+    red: 100%
+    green: 20%
+    blue: 20%
+  - id: color_green
+    red: 20%
+    green: 100%
+    blue: 20%
+  - id: color_blue
+    red: 20%
+    green: 60%
+    blue: 100%
+  - id: color_yellow
+    red: 100%
+    green: 100%
+    blue: 20%
+  - id: color_orange
+    red: 100%
+    green: 60%
+    blue: 0%
+  - id: color_cyan
+    red: 0%
+    green: 100%
+    blue: 100%

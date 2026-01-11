@@ -1,0 +1,304 @@
+# ==============================================================================
+# VOICE PE BASE PACKAGE
+# ==============================================================================
+# Hardware-specific configuration for Home Assistant Voice Preview Edition.
+# This package handles the XMOS voice processor, AIC3204 DAC, LED ring,
+# and physical controls (rotary encoder, mute switch, button).
+#
+# The XMOS processor handles echo cancellation and noise suppression in
+# hardware, so no software AEC is needed.
+#
+# Include this package in intercom-voice-pe.yaml:
+#
+#   packages:
+#     voice_pe: !include packages/voice_pe_base.yaml
+#     base: !include packages/intercom_base.yaml
+#
+# ==============================================================================
+
+# ==============================================================================
+# EXTERNAL COMPONENTS - Voice PE specific
+# ==============================================================================
+external_components:
+  # Voice Kit component from official ESPHome Voice PE repo (for XMOS control)
+  - source:
+      type: git
+      url: https://github.com/esphome/home-assistant-voice-pe
+      ref: dev
+    components: [voice_kit]
+
+# ==============================================================================
+# I2C BUS (shared by XMOS and AIC3204)
+# ==============================================================================
+i2c:
+  - id: i2c_bus
+    sda: GPIO5
+    scl: GPIO6
+    frequency: 400kHz
+    scan: false
+
+# ==============================================================================
+# XMOS VOICE PROCESSOR
+# Handles AEC, noise suppression, interference cancellation, and AGC
+# ==============================================================================
+voice_kit:
+  id: voice_kit_xmos
+  i2c_id: i2c_bus
+  reset_pin: GPIO4
+  # XMOS firmware will be auto-updated if version mismatch detected
+
+# ==============================================================================
+# I2S AUDIO CONFIGURATION - Dual Bus Setup
+# Voice PE uses SEPARATE I2S interfaces for mic and speaker
+# ==============================================================================
+i2s_audio:
+  # Microphone input (ESP32 is SLAVE - XMOS provides clock)
+  - id: i2s_mic
+    i2s_lrclk_pin: GPIO14
+    i2s_bclk_pin: GPIO13
+    i2s_mode: secondary  # ESP32 is slave, XMOS is master
+
+  # Speaker output (ESP32 is MASTER)
+  - id: i2s_spk
+    i2s_lrclk_pin: GPIO7
+    i2s_bclk_pin: GPIO8
+
+# ==============================================================================
+# MICROPHONE - From XMOS processed output
+# ==============================================================================
+microphone:
+  - platform: i2s_audio
+    id: mic_xmos
+    i2s_audio_id: i2s_mic
+    i2s_din_pin: GPIO15
+    adc_type: external
+    sample_rate: 16000
+    bits_per_sample: 32bit
+    channel: left  # Use left channel for mono
+
+# ==============================================================================
+# SPEAKER - To AIC3204 DAC
+# Hardware runs at 48kHz, but intercom audio is 16kHz.
+# The intercom_audio component calls set_audio_stream_info() to tell the
+# speaker component what rate the incoming audio is, and ESPHome handles
+# the resampling automatically.
+# ==============================================================================
+speaker:
+  - platform: i2s_audio
+    id: spk_aic3204
+    i2s_audio_id: i2s_spk
+    i2s_dout_pin: GPIO10
+    dac_type: external
+    sample_rate: 48000  # Hardware rate (AIC3204)
+    bits_per_sample: 32bit
+    channel: stereo
+    timeout: 100ms
+    buffer_duration: 100ms
+
+# Speaker amplifier enable
+output:
+  - platform: gpio
+    id: speaker_enable_pin
+    pin: GPIO47
+
+# ==============================================================================
+# LED RING (12 RGB LEDs)
+# ==============================================================================
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_led
+    name: "LED Ring"
+    icon: "mdi:led-on"
+    pin: GPIO11
+    chipset: WS2812
+    num_leds: 12
+    rgb_order: GRB
+    rmt_channel: 0
+    default_transition_length: 100ms
+    effects:
+      # Idle - gentle blue breathing
+      - pulse:
+          name: "Breathing Blue"
+          min_brightness: 10%
+          max_brightness: 40%
+          transition_length: 2s
+          update_interval: 50ms
+      # Ringing - red spinning
+      - addressable_rainbow:
+          name: "Ringing"
+          speed: 30
+          width: 12
+      - strobe:
+          name: "Ringing Flash"
+          colors:
+            - state: true
+              brightness: 100%
+              red: 100%
+              green: 0%
+              blue: 0%
+              duration: 300ms
+            - state: false
+              duration: 300ms
+      # Calling out - orange pulse
+      - strobe:
+          name: "Calling"
+          colors:
+            - state: true
+              brightness: 100%
+              red: 100%
+              green: 50%
+              blue: 0%
+              duration: 500ms
+            - state: false
+              duration: 500ms
+      # In call - solid green
+      - lambda:
+          name: "In Call"
+          update_interval: 100ms
+          lambda: |-
+            for (int i = 0; i < it.size(); i++) {
+              it[i] = Color(0, 180, 0);
+            }
+      # Processing/thinking - cyan spinner
+      - addressable_scan:
+          name: "Processing"
+          move_interval: 50ms
+          scan_width: 3
+      # Muted - solid red
+      - lambda:
+          name: "Muted"
+          update_interval: 100ms
+          lambda: |-
+            for (int i = 0; i < it.size(); i++) {
+              it[i] = Color(180, 0, 0);
+            }
+
+# ==============================================================================
+# PHYSICAL CONTROLS
+# ==============================================================================
+
+# Rotary Encoder (Volume control)
+sensor:
+  - platform: rotary_encoder
+    id: volume_encoder
+    name: "Volume Encoder"
+    pin_a:
+      number: GPIO40
+      mode: INPUT_PULLUP
+    pin_b:
+      number: GPIO39
+      mode: INPUT_PULLUP
+    resolution: 1
+    min_value: 0
+    max_value: 100
+    publish_initial_value: true
+    restore_mode: RESTORE_DEFAULT_ZERO
+    on_value:
+      then:
+        - lambda: |-
+            float vol = x / 100.0f;
+            id(spk_aic3204).set_volume(vol);
+
+binary_sensor:
+  # Multi-function button (top of device)
+  - platform: gpio
+    id: main_button
+    name: "Main Button"
+    icon: "mdi:gesture-tap-button"
+    pin:
+      number: GPIO1
+      mode: INPUT_PULLUP
+      inverted: true
+    on_multi_click:
+      # Short press: call/answer/hangup
+      - timing:
+          - ON for at most 1s
+          - OFF for at least 50ms
+        then:
+          - button.press: call_button
+      # Long press (>1s): next contact
+      - timing:
+          - ON for at least 1s
+        then:
+          - button.press: next_contact_button
+
+  # Hardware mute switch
+  - platform: gpio
+    id: mute_switch
+    name: "Mute Switch"
+    icon: "mdi:microphone-off"
+    pin:
+      number: GPIO2
+      mode: INPUT_PULLUP
+      inverted: true
+    on_press:
+      then:
+        - microphone.stop: mic_xmos
+        - light.turn_on:
+            id: status_led
+            effect: "Muted"
+    on_release:
+      then:
+        - microphone.start: mic_xmos
+        - lambda: |-
+            // Restore appropriate LED state based on call_state
+            if (id(call_state) == 0) {
+              auto call = id(status_led).turn_off();
+              call.perform();
+            } else if (id(call_state) == 3) {
+              auto call = id(status_led).turn_on();
+              call.set_effect("In Call");
+              call.perform();
+            }
+
+# ==============================================================================
+# NUMBER CONTROLS
+# ==============================================================================
+number:
+  # Speaker volume (exposed to HA)
+  - platform: template
+    id: speaker_volume
+    name: "Speaker Volume"
+    icon: "mdi:volume-high"
+    min_value: 0
+    max_value: 100
+    step: 5
+    initial_value: 50
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "%"
+    set_action:
+      - lambda: |-
+          float vol = x / 100.0f;
+          id(spk_aic3204).set_volume(vol);
+          // Sync rotary encoder display
+          id(volume_encoder).publish_state(x);
+
+  # Microphone gain (software amplification)
+  - platform: template
+    id: mic_gain
+    name: "Microphone Gain"
+    icon: "mdi:microphone"
+    min_value: 1
+    max_value: 16
+    step: 1
+    initial_value: 4
+    optimistic: true
+    restore_value: true
+    set_action:
+      - lambda: 'id(intercom).set_mic_gain((int)x);'
+
+# ==============================================================================
+# SWITCH CONTROLS
+# ==============================================================================
+switch:
+  # Microphone mute (software, separate from hardware switch)
+  - platform: template
+    id: mic_mute_switch
+    name: "Microphone Mute"
+    icon: "mdi:microphone-off"
+    optimistic: true
+    turn_on_action:
+      - microphone.stop: mic_xmos
+    turn_off_action:
+      - microphone.start: mic_xmos

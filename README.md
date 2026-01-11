@@ -241,7 +241,11 @@ The repository includes fully working configurations:
 
 - **`intercom.yaml`** - Xiaozhi Ball V3 (ES8311 codec + GC9A01A display)
 - **`intercom-mini.yaml`** - ESP32-S3 Mini (SPH0645 mic + MAX98357A speaker)
+- **`intercom-voice-pe.yaml`** - Home Assistant Voice Preview Edition (XMOS + AIC3204)
+- **`intercom-waveshare.yaml`** - Waveshare ESP32-S3-Touch-AMOLED-1.8 (ES8311 + SH8601 display)
 - **`packages/intercom_base.yaml`** - Shared package with call logic
+- **`packages/voice_pe_base.yaml`** - Voice PE hardware package
+- **`packages/waveshare_amoled_base.yaml`** - Waveshare AMOLED hardware package
 
 These files implement a complete intercom system with:
 - Call state machine (IDLE → RINGING → IN_CALL)
@@ -466,12 +470,90 @@ views:
         column_span: 2
 ```
 
+## Waveshare ESP32-S3-Touch-AMOLED-1.8 Support
+
+The Waveshare AMOLED device features a large 1.8" touchscreen display (368x448) with the ES8311 audio codec:
+
+- **ES8311 codec** on single I2S bus (uses `i2s_audio_duplex` for full-duplex)
+- **SH8601 AMOLED** display with QSPI interface
+- **FT3168 touch controller** for tap-based controls
+- **Software AEC** via `esp_aec` component
+
+### Waveshare Configuration
+
+```yaml
+external_components:
+  - source:
+      type: git
+      url: https://github.com/kenvandine/esphome-intercom
+      ref: main
+    components: [intercom_audio, i2s_audio_duplex, esp_aec, mdns_discovery]
+
+# Uses i2s_audio_duplex for single-bus full-duplex (ES8311)
+intercom_audio:
+  id: intercom
+  duplex_id: i2s_duplex      # i2s_audio_duplex component
+  aec_id: aec_component      # Software echo cancellation
+  listen_port: 12345
+  remote_ip: !lambda 'return id(selected_ip).state;'
+  remote_port: 12345
+```
+
+### Touch Controls
+
+The display is divided into touch zones:
+- **Bottom area (y > 350)**: Tap to call/answer/hangup
+- **Top area (y < 100)**: Tap to cycle to next contact
+
+See `intercom-waveshare.yaml` and `packages/waveshare_amoled_base.yaml` for the complete configuration.
+
+## Home Assistant Voice PE Support
+
+The Voice Preview Edition uses different hardware architecture than typical ESP32 audio devices:
+
+- **XMOS XU316** voice processor handles AEC, noise suppression, and AGC in hardware
+- **Dual I2S buses** - separate for microphone input and speaker output
+- **ESP32 is I2S slave** for microphone (XMOS provides clock)
+- **12-LED ring** for visual feedback instead of display
+
+Because XMOS handles echo cancellation in hardware, **no software AEC is needed**.
+
+### Voice PE Configuration
+
+```yaml
+external_components:
+  - source:
+      type: git
+      url: https://github.com/kenvandine/esphome-intercom
+      ref: main
+    components: [intercom_audio, mdns_discovery]
+  - source:
+      type: git
+      url: https://github.com/esphome/home-assistant-voice-pe
+      ref: dev
+    components: [voice_kit]
+
+# Uses ESPHome's standard microphone and speaker components
+intercom_audio:
+  id: intercom
+  microphone_id: mic_xmos      # From i2s_audio microphone
+  speaker_id: spk_aic3204      # From i2s_audio speaker
+  # No aec_id needed - XMOS handles echo cancellation
+  listen_port: 12345
+  remote_ip: !lambda 'return id(selected_ip).state;'
+  remote_port: 12345
+```
+
+See `intercom-voice-pe.yaml` and `packages/voice_pe_base.yaml` for the complete configuration including LED ring effects, rotary encoder volume control, and hardware mute switch.
+
 ## Tested Hardware
 
 | Device | Codec/Mic | Speaker | Notes |
 |--------|-----------|---------|-------|
 | Xiaozhi Ball V3 | ES8311 (I2S duplex) | Built-in | Round GC9A01A display |
 | ESP32-S3 Mini | SPH0645 (I2S) | MAX98357A | Budget-friendly setup |
+| Voice PE | XMOS + AIC3204 | Built-in | Hardware AEC, 12-LED ring |
+| Waveshare AMOLED 1.8 | ES8311 (I2S duplex) | Built-in | 368x448 AMOLED touchscreen |
 
 ## Audio Format
 
