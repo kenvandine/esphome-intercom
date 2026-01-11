@@ -16,12 +16,84 @@
 # ==============================================================================
 
 # ==============================================================================
-# I2C BUS (for ES8311 codec and touch controller)
+# I2C BUS (for ES8311 codec, touch controller, and GPIO expander)
 # ==============================================================================
 i2c:
+  id: i2c_bus
   sda: GPIO15
   scl: GPIO14
-  scan: false
+  scan: true
+  frequency: 100kHz
+  timeout: 100ms
+
+# ==============================================================================
+# TCA9554 GPIO EXPANDER (controls display/touch power)
+# ==============================================================================
+pca9554:
+  - id: tca9554_exp
+    address: 0x20
+
+# GPIO switches from expander to enable display/touch power
+# Pins 0, 1, 2, 6 must be HIGH to power display and touch
+switch:
+  - platform: gpio
+    id: exp_pin0
+    pin:
+      pca9554: tca9554_exp
+      number: 0
+      mode: output
+    restore_mode: ALWAYS_ON
+    internal: true
+  - platform: gpio
+    id: exp_pin1
+    pin:
+      pca9554: tca9554_exp
+      number: 1
+      mode: output
+    restore_mode: ALWAYS_ON
+    internal: true
+  - platform: gpio
+    id: exp_pin2
+    pin:
+      pca9554: tca9554_exp
+      number: 2
+      mode: output
+    restore_mode: ALWAYS_ON
+    internal: true
+  - platform: gpio
+    id: exp_pin6
+    pin:
+      pca9554: tca9554_exp
+      number: 6
+      mode: output
+    restore_mode: ALWAYS_ON
+    internal: true
+  # Echo cancellation toggle
+  - platform: i2s_audio_duplex
+    i2s_audio_duplex_id: i2s_duplex
+    aec:
+      name: "Echo Cancellation"
+      icon: "mdi:ear-hearing"
+
+# Other outputs
+output:
+  # Speaker amplifier enable
+  - platform: gpio
+    id: speaker_enable
+    pin: GPIO46
+  # Display backlight
+  - platform: ledc
+    id: backlight_output
+    pin: GPIO38
+    frequency: 1000Hz
+  # Virtual status LED output
+  - platform: template
+    id: status_led_output
+    type: binary
+    write_action:
+      - lambda: |-
+          // Virtual output - status shown on display instead
+          ESP_LOGV("status", "Status LED: %s", state ? "ON" : "OFF");
 
 # ==============================================================================
 # AUDIO CODEC (ES8311)
@@ -54,65 +126,21 @@ i2s_audio_duplex:
   sample_rate: 16000
   aec_id: aec_component
 
-# Speaker amplifier enable
-output:
-  - platform: gpio
-    id: speaker_enable
-    pin: GPIO46
-  - platform: ledc
-    id: backlight_output
-    pin:
-      number: GPIO38
-      ignore_strapping_warning: true
-    frequency: 1000Hz
-
 # ==============================================================================
 # DISPLAY (SH8601 QSPI AMOLED 368x448)
 # ==============================================================================
 spi:
   - id: qspi_bus
     type: quad
-    clk_pin: GPIO47
+    clk_pin: GPIO11
     data_pins:
-      - GPIO18
-      - GPIO7
-      - GPIO48
+      - GPIO4
       - GPIO5
+      - GPIO6
+      - GPIO7
 
-display:
-  - platform: qspi_amoled
-    id: main_display
-    model: custom
-    dimensions:
-      width: 368
-      height: 448
-    cs_pin: GPIO6
-    reset_pin: GPIO17
-    brightness: 255
-    color_order: rgb
-    invert_colors: false
-    update_interval: never
-    # SH8601 initialization commands
-    init_sequence:
-      # Sleep out
-      - [0x11, 0]
-      - delay 120ms
-      # Display on
-      - [0x29, 0]
-    pages:
-      # Page definitions will be in the main YAML
-      - id: page_idle
-        lambda: |-
-          // Placeholder - defined in main YAML
-      - id: page_ringing_in
-        lambda: |-
-          // Placeholder
-      - id: page_ringing_out
-        lambda: |-
-          // Placeholder
-      - id: page_in_call
-        lambda: |-
-          // Placeholder
+# Display is defined in the main device YAML file
+# since pages need device-specific content
 
 # ==============================================================================
 # TOUCHSCREEN (FT3168)
@@ -120,9 +148,8 @@ display:
 touchscreen:
   - platform: ft5x06
     id: touch_screen
-    interrupt_pin: GPIO12
-    reset_pin: GPIO13
-    address: 0x15
+    interrupt_pin: GPIO21
+    address: 0x38
     on_touch:
       - lambda: |-
           ESP_LOGD("touch", "Touch at (%d, %d)", touch.x, touch.y);
@@ -168,15 +195,6 @@ light:
               duration: 500ms
             - state: false
               duration: 500ms
-
-output:
-  - platform: template
-    id: status_led_output
-    type: binary
-    write_action:
-      - lambda: |-
-          // Virtual output - status shown on display instead
-          ESP_LOGV("status", "Status LED: %s", state ? "ON" : "OFF");
 
 # ==============================================================================
 # PHYSICAL CONTROLS
@@ -243,17 +261,6 @@ number:
     restore_value: true
     set_action:
       - lambda: 'id(intercom).set_mic_gain((int)x);'
-
-# ==============================================================================
-# SWITCH CONTROLS
-# ==============================================================================
-switch:
-  # Echo cancellation toggle
-  - platform: i2s_audio_duplex
-    i2s_audio_duplex_id: i2s_duplex
-    aec:
-      name: "Echo Cancellation"
-      icon: "mdi:ear-hearing"
 
 # ==============================================================================
 # FONTS (for display)
