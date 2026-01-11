@@ -165,6 +165,11 @@ void IntercomAudio::loop() {
     default:
       break;
   }
+
+  // Generate ringtone if active (called every loop iteration)
+  if (this->ringtone_active_) {
+    this->generate_ringtone_();
+  }
 }
 
 void IntercomAudio::start() {
@@ -716,6 +721,89 @@ void IntercomAudio::aec_task_() {
   ESP_LOGI(TAG, "AEC task stopped");
 }
 #endif  // USE_ESP_AEC
+
+// Ringtone implementation
+void IntercomAudio::play_ringtone() {
+  if (this->ringtone_active_) {
+    return;  // Already playing
+  }
+  ESP_LOGI(TAG, "Starting ringtone");
+  this->ringtone_active_ = true;
+  this->ringtone_phase_ = 0;
+  this->ringtone_beep_count_ = 0;
+}
+
+void IntercomAudio::stop_ringtone() {
+  if (!this->ringtone_active_) {
+    return;
+  }
+  ESP_LOGI(TAG, "Stopping ringtone");
+  this->ringtone_active_ = false;
+}
+
+void IntercomAudio::generate_ringtone_() {
+  if (!this->ringtone_active_) {
+    return;
+  }
+
+  // Generate a beep pattern: 200ms beep, 200ms silence, repeat 2x, then 400ms pause
+  // Total cycle: 1200ms (beep-pause-beep-pause-long_pause)
+  static const uint32_t BEEP_SAMPLES = SAMPLE_RATE / 5;      // 200ms = 3200 samples
+  static const uint32_t PAUSE_SAMPLES = SAMPLE_RATE / 5;     // 200ms
+  static const uint32_t LONG_PAUSE_SAMPLES = SAMPLE_RATE * 2 / 5;  // 400ms
+  static const uint32_t CYCLE_SAMPLES = (BEEP_SAMPLES + PAUSE_SAMPLES) * 2 + LONG_PAUSE_SAMPLES;
+
+  // Generate one frame of audio (16ms = 256 samples)
+  static const size_t FRAME_SIZE = 256;
+  int16_t frame[FRAME_SIZE];
+
+  // Frequency: 800Hz for a pleasant ring tone
+  static const float FREQ = 800.0f;
+  static const float TWO_PI = 6.28318530718f;
+  static const float AMPLITUDE = 16000.0f;  // ~50% of max amplitude
+
+  for (size_t i = 0; i < FRAME_SIZE; i++) {
+    uint32_t pos = (this->ringtone_phase_ + i) % CYCLE_SAMPLES;
+
+    // Determine if we're in a beep or silence period
+    bool in_beep = false;
+    if (pos < BEEP_SAMPLES) {
+      in_beep = true;  // First beep
+    } else if (pos >= BEEP_SAMPLES + PAUSE_SAMPLES &&
+               pos < 2 * BEEP_SAMPLES + PAUSE_SAMPLES) {
+      in_beep = true;  // Second beep
+    }
+
+    if (in_beep) {
+      // Generate sine wave
+      float t = static_cast<float>(this->ringtone_phase_ + i) / SAMPLE_RATE;
+      frame[i] = static_cast<int16_t>(AMPLITUDE * sinf(TWO_PI * FREQ * t));
+    } else {
+      frame[i] = 0;
+    }
+  }
+
+  this->ringtone_phase_ = (this->ringtone_phase_ + FRAME_SIZE) % (CYCLE_SAMPLES * 1000);  // Avoid overflow
+
+  // Play to speaker
+#ifdef USE_I2S_AUDIO_DUPLEX
+  if (this->duplex_ != nullptr) {
+    this->duplex_->play(reinterpret_cast<uint8_t *>(frame), FRAME_SIZE * sizeof(int16_t));
+    return;
+  }
+#endif
+#ifdef USE_SPEAKER
+  if (this->speaker_ != nullptr) {
+    // For speaker component, we need to set the audio info first if not streaming
+    if (!this->is_streaming()) {
+      audio::AudioStreamInfo info(16, 1, SAMPLE_RATE);  // bits, channels, rate
+      this->speaker_->set_audio_stream_info(info);
+      this->speaker_->start();
+    }
+    this->speaker_->play(reinterpret_cast<uint8_t *>(frame), FRAME_SIZE * sizeof(int16_t));
+  }
+#endif
+}
 
 }  // namespace intercom_audio
 }  // namespace esphome

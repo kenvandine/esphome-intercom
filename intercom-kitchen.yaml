@@ -29,7 +29,7 @@
 
 substitutions:
   name: intercom-kitchen
-  friendly_name: Kitchen Intercom
+  friendly_name: Hermes - Kitchen
   p2p_port: "12345"
   signaling_port: "12350"
   signaling_broadcast: "192.168.1.255"
@@ -65,31 +65,28 @@ esphome:
     board_build.flash_mode: dio
     board_build.flash_size: 16MB
   on_boot:
-    priority: 600
-    then:
-      # Wait for XMOS to initialize
-      - delay: 3s
-      - lambda: |-
-          // Extract HA IP from static_contacts[0] (format: "Name|IP")
-          if (id(static_contacts)[0] && id(static_contacts)[0][0]) {
-            std::string entry = id(static_contacts)[0];
-            size_t sep = entry.find('|');
-            if (sep != std::string::npos) {
-              id(ha_ip) = entry.substr(sep + 1);
+    - priority: 600
+      then:
+        # Wait for XMOS to initialize
+        - delay: 3s
+        - lambda: |-
+            // Extract HA IP from static_contacts[0] (format: "Name|IP")
+            if (id(static_contacts)[0] && id(static_contacts)[0][0]) {
+              std::string entry = id(static_contacts)[0];
+              size_t sep = entry.find('|');
+              if (sep != std::string::npos) {
+                id(ha_ip) = entry.substr(sep + 1);
+              }
             }
-          }
-          // Restore speaker volume from saved state
-          float vol = id(speaker_volume).state / 100.0f;
-          id(spk_aic3204).set_volume(vol);
-          // Restore mic gain from saved state
-          id(intercom).set_mic_gain((int)id(mic_gain).state);
-      # Resolve first contact at boot
-      - script.execute: resolve_selected_contact
-      # Set LED to idle state
-      - light.turn_on:
-          id: status_led
-          brightness: 30%
-          effect: "Breathing Blue"
+            // Restore speaker volume from saved state
+            float vol = id(speaker_volume).state / 100.0f;
+            id(spk_aic3204).set_volume(vol);
+            // Restore mic gain from saved state
+            id(intercom).set_mic_gain((int)id(mic_gain).state);
+        # Resolve first contact at boot
+        - script.execute: resolve_selected_contact
+        # Initialize LED ring
+        - script.execute: init_led_ring
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -119,6 +116,9 @@ api:
 
 ota:
   - platform: esphome
+
+web_server:
+  port: 80
 
 logger:
   hardware_uart: USB_SERIAL_JTAG
@@ -222,6 +222,9 @@ text_sensor:
     on_value:
       then:
         - lambda: |-
+            // Don't access LED until it's initialized
+            if (!id(led_initialized)) return;
+
             switch(id(call_state)) {
               case 0:  // IDLE
                 {
@@ -258,35 +261,3 @@ text_sensor:
                 break;
             }
 
-# ==============================================================================
-# SENSORS
-# ==============================================================================
-sensor:
-  # Extend with intercom-specific sensors
-  - platform: intercom_audio
-    intercom_audio_id: intercom
-    tx_packets:
-      name: "TX Packets"
-      icon: "mdi:upload-network"
-    rx_packets:
-      name: "RX Packets"
-      icon: "mdi:download-network"
-    buffer_fill:
-      name: "Buffer Fill"
-      icon: "mdi:memory"
-
-  - platform: mdns_discovery
-    mdns_discovery_id: discovery
-    peer_count:
-      name: "Peer Count"
-      icon: "mdi:account-group"
-
-# ==============================================================================
-# TEXT SENSORS
-# ==============================================================================
-  # Discovered peers list
-  - platform: mdns_discovery
-    mdns_discovery_id: discovery
-    peers_list:
-      name: "Discovered Peers"
-      icon: "mdi:lan"

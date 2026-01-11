@@ -28,6 +28,75 @@ external_components:
     components: [voice_kit]
 
 # ==============================================================================
+# GLOBALS - Volume display state
+# ==============================================================================
+globals:
+  - id: volume_display_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: led_initialized
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+# ==============================================================================
+# SCRIPTS - LED control
+# ==============================================================================
+script:
+  # Initialize LED ring to idle state
+  - id: init_led_ring
+    mode: single
+    then:
+      - switch.turn_on: led_power_switch
+      - delay: 500ms
+      - light.turn_on:
+          id: status_led
+          brightness: 30%
+          effect: "Breathing Blue"
+      - lambda: 'id(led_initialized) = true;'
+      - logger.log:
+          level: INFO
+          format: "LED ring initialized"
+
+  # Override to enable speaker amplifier for ringtone
+  - id: !extend enable_speaker_for_ringtone
+    then:
+      - output.turn_on: speaker_enable_pin
+      - logger.log: "Speaker amplifier enabled for ringtone"
+
+  - id: show_volume_on_leds
+    mode: restart
+    then:
+      - logger.log: "show_volume_on_leds script triggered"
+      - if:
+          condition:
+            lambda: 'return id(led_initialized);'
+          then:
+            - logger.log: "LED initialized, showing volume"
+            - lambda: 'id(volume_display_active) = true;'
+            - light.turn_on:
+                id: status_led
+                brightness: 80%
+                effect: "Volume Display"
+            - delay: 2s
+            - lambda: 'id(volume_display_active) = false;'
+            # Return to normal state based on call_state
+            - lambda: |-
+                if (id(call_state) == 0) {
+                  auto call = id(status_led).turn_on();
+                  call.set_brightness(0.3f);
+                  call.set_rgb(0.0f, 0.0f, 1.0f);
+                  call.set_effect("Breathing Blue");
+                  call.perform();
+                } else if (id(call_state) == 3) {
+                  auto call = id(status_led).turn_on();
+                  call.set_brightness(0.8f);
+                  call.set_effect("In Call");
+                  call.perform();
+                }
+
+# ==============================================================================
 # I2C BUS (shared by XMOS and AIC3204)
 # ==============================================================================
 i2c:
@@ -56,7 +125,6 @@ i2s_audio:
   - id: i2s_mic
     i2s_lrclk_pin: GPIO14
     i2s_bclk_pin: GPIO13
-    i2s_mode: secondary  # ESP32 is slave, XMOS is master
 
   # Speaker output (ESP32 is MASTER)
   - id: i2s_spk
@@ -74,7 +142,8 @@ microphone:
     adc_type: external
     sample_rate: 16000
     bits_per_sample: 32bit
-    channel: left  # Use left channel for mono
+    channel: left
+    i2s_mode: secondary  # ESP32 is slave, XMOS provides clock
 
 # ==============================================================================
 # SPEAKER - To AIC3204 DAC
@@ -101,28 +170,36 @@ output:
     id: speaker_enable_pin
     pin: GPIO47
 
+# LED ring power enable (directly managed by switch below)
+
 # ==============================================================================
-# LED RING (12 RGB LEDs)
+# LED RING (12 RGB LEDs on GPIO21, power on GPIO45)
 # ==============================================================================
 light:
   - platform: esp32_rmt_led_strip
     id: status_led
     name: "LED Ring"
     icon: "mdi:led-on"
-    pin: GPIO11
+    pin: GPIO21
     chipset: WS2812
     num_leds: 12
     rgb_order: GRB
-    rmt_channel: 0
     default_transition_length: 100ms
     effects:
-      # Idle - gentle blue breathing
-      - pulse:
+      # Idle - gentle blue breathing (addressable version for LED strip)
+      - addressable_lambda:
           name: "Breathing Blue"
-          min_brightness: 10%
-          max_brightness: 40%
-          transition_length: 2s
           update_interval: 50ms
+          lambda: |-
+            static uint16_t phase = 0;
+            phase = (phase + 1) % 200;  // 200 steps = 10 seconds cycle at 50ms
+            // Calculate brightness: sine wave between 0.1 and 0.4
+            float brightness = 0.1f + 0.15f * (1.0f + sin(phase * 3.14159f / 100.0f));
+            uint8_t blue = (uint8_t)(brightness * 255);
+            uint8_t dim_blue = blue / 3;  // Slight tint
+            for (int i = 0; i < it.size(); i++) {
+              it[i] = Color(0, dim_blue, blue);
+            }
       # Ringing - red spinning
       - addressable_rainbow:
           name: "Ringing"
@@ -152,7 +229,7 @@ light:
             - state: false
               duration: 500ms
       # In call - solid green
-      - lambda:
+      - addressable_lambda:
           name: "In Call"
           update_interval: 100ms
           lambda: |-
@@ -165,12 +242,31 @@ light:
           move_interval: 50ms
           scan_width: 3
       # Muted - solid red
-      - lambda:
+      - addressable_lambda:
           name: "Muted"
           update_interval: 100ms
           lambda: |-
             for (int i = 0; i < it.size(); i++) {
               it[i] = Color(180, 0, 0);
+            }
+      # Volume display - shows volume level on LEDs
+      - addressable_lambda:
+          name: "Volume Display"
+          update_interval: 50ms
+          lambda: |-
+            float vol = id(speaker_volume).state;
+            int leds_to_light = (int)((vol / 100.0f) * it.size() + 0.5f);
+            for (int i = 0; i < it.size(); i++) {
+              if (i < leds_to_light) {
+                // Cyan for normal, orange for high volume
+                if (vol > 80) {
+                  it[i] = Color(255, 128, 0);  // Orange
+                } else {
+                  it[i] = Color(0, 200, 200);  // Cyan
+                }
+              } else {
+                it[i] = Color(0, 0, 0);  // Off
+              }
             }
 
 # ==============================================================================
@@ -183,12 +279,12 @@ sensor:
     id: volume_encoder
     name: "Volume Encoder"
     pin_a:
-      number: GPIO40
+      number: GPIO16
       mode: INPUT_PULLUP
     pin_b:
-      number: GPIO39
+      number: GPIO18
       mode: INPUT_PULLUP
-    resolution: 1
+    resolution: 2
     min_value: 0
     max_value: 100
     publish_initial_value: true
@@ -196,17 +292,21 @@ sensor:
     on_value:
       then:
         - lambda: |-
+            ESP_LOGW("encoder", "Encoder value changed to: %.0f", x);
             float vol = x / 100.0f;
             id(spk_aic3204).set_volume(vol);
+            id(speaker_volume).publish_state(x);
+        # Show volume on LED ring
+        - script.execute: show_volume_on_leds
 
 binary_sensor:
-  # Multi-function button (top of device)
+  # Multi-function button (center of dial)
   - platform: gpio
     id: main_button
     name: "Main Button"
     icon: "mdi:gesture-tap-button"
     pin:
-      number: GPIO1
+      number: GPIO0
       mode: INPUT_PULLUP
       inverted: true
     on_multi_click:
@@ -228,18 +328,18 @@ binary_sensor:
     name: "Mute Switch"
     icon: "mdi:microphone-off"
     pin:
-      number: GPIO2
+      number: GPIO3
       mode: INPUT_PULLUP
       inverted: true
     on_press:
       then:
-        - microphone.stop: mic_xmos
+        - switch.turn_on: mic_mute_switch
         - light.turn_on:
             id: status_led
             effect: "Muted"
     on_release:
       then:
-        - microphone.start: mic_xmos
+        - switch.turn_off: mic_mute_switch
         - lambda: |-
             // Restore appropriate LED state based on call_state
             if (id(call_state) == 0) {
@@ -292,13 +392,19 @@ number:
 # SWITCH CONTROLS
 # ==============================================================================
 switch:
+  # LED ring power enable
+  - platform: gpio
+    id: led_power_switch
+    name: "LED Power"
+    icon: "mdi:led-on"
+    pin: GPIO45
+    restore_mode: ALWAYS_ON
+
   # Microphone mute (software, separate from hardware switch)
+  # The intercom_audio component checks this state to decide whether to send audio
   - platform: template
     id: mic_mute_switch
     name: "Microphone Mute"
     icon: "mdi:microphone-off"
     optimistic: true
-    turn_on_action:
-      - microphone.stop: mic_xmos
-    turn_off_action:
-      - microphone.start: mic_xmos
+    restore_mode: RESTORE_DEFAULT_OFF

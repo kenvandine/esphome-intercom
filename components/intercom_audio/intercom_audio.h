@@ -144,6 +144,11 @@ class IntercomAudio : public Component {
   void set_aec_enabled(bool enabled) { this->aec_enabled_ = enabled; }
   bool is_aec_enabled() const { return this->aec_enabled_; }
 
+  // Ringtone control
+  void play_ringtone();
+  void stop_ringtone();
+  bool is_ringtone_playing() const { return this->ringtone_active_; }
+
   // Triggers for automations
   Trigger<> *get_start_trigger() { return &this->start_trigger_; }
   Trigger<> *get_stop_trigger() { return &this->stop_trigger_; }
@@ -226,6 +231,12 @@ class IntercomAudio : public Component {
   uint32_t tx_drops_{0};  // Buffer overruns on TX
   uint32_t rx_drops_{0};  // Buffer overruns on RX
 
+  // Ringtone generation
+  bool ringtone_active_{false};
+  uint32_t ringtone_phase_{0};
+  uint32_t ringtone_beep_count_{0};
+  void generate_ringtone_();
+
   // Automations
   Trigger<> start_trigger_;
   Trigger<> stop_trigger_;
@@ -238,7 +249,7 @@ class StartAction : public Action<Ts...>, public Parented<IntercomAudio> {
   void set_remote_ip(std::function<std::string(Ts...)> func) { this->remote_ip_ = func; }
   void set_remote_port(std::function<uint16_t(Ts...)> func) { this->remote_port_ = func; }
 
-  void play(Ts... x) override {
+  void play(const Ts &...x) override {
     if (this->remote_ip_.has_value() && this->remote_port_.has_value()) {
       this->parent_->start(this->remote_ip_.value()(x...), this->remote_port_.value()(x...));
     } else if (this->remote_ip_.has_value()) {
@@ -256,13 +267,25 @@ class StartAction : public Action<Ts...>, public Parented<IntercomAudio> {
 template<typename... Ts>
 class StopAction : public Action<Ts...>, public Parented<IntercomAudio> {
  public:
-  void play(Ts... x) override { this->parent_->stop(); }
+  void play(const Ts &...x) override { this->parent_->stop(); }
 };
 
 template<typename... Ts>
 class ResetCountersAction : public Action<Ts...>, public Parented<IntercomAudio> {
  public:
-  void play(Ts... x) override { this->parent_->reset_counters(); }
+  void play(const Ts &...x) override { this->parent_->reset_counters(); }
+};
+
+template<typename... Ts>
+class PlayRingtoneAction : public Action<Ts...>, public Parented<IntercomAudio> {
+ public:
+  void play(const Ts &...x) override { this->parent_->play_ringtone(); }
+};
+
+template<typename... Ts>
+class StopRingtoneAction : public Action<Ts...>, public Parented<IntercomAudio> {
+ public:
+  void play(const Ts &...x) override { this->parent_->stop_ringtone(); }
 };
 
 }  // namespace intercom_audio

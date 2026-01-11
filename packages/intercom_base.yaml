@@ -201,12 +201,22 @@ udp:
       - script.execute: flush_signaling
       - component.update: call_state_text
       - component.update: call_from_text
-      # Start ring timeout if entering RINGING_IN
+      # Start ringtone and ring timeout if entering RINGING_IN
       - if:
           condition:
             lambda: 'return id(call_state) == 1;'
           then:
+            - script.execute: enable_speaker_for_ringtone
+            - intercom_audio.play_ringtone:
+                id: intercom
             - script.execute: ring_timeout_script
+      # Stop ringtone if leaving RINGING_IN state
+      - if:
+          condition:
+            lambda: 'return id(call_state) != 1;'
+          then:
+            - intercom_audio.stop_ringtone:
+                id: intercom
 
 # ==============================================================================
 # SCRIPTS
@@ -292,6 +302,12 @@ script:
                 data: !lambda 'return std::vector<uint8_t>(id(signaling_msg).begin(), id(signaling_msg).end());'
             - lambda: 'id(signaling_msg).clear();'
 
+  # Enable speaker for ringtone (override in device-specific yaml if needed)
+  - id: enable_speaker_for_ringtone
+    mode: single
+    then:
+      - logger.log: "Enabling speaker for ringtone"
+
   # Ring timeout - auto hangup if no answer
   - id: ring_timeout_script
     mode: restart
@@ -316,6 +332,8 @@ script:
             id(caller_name) = "";
             id(caller_ip) = "";
           }
+      - intercom_audio.stop_ringtone:
+          id: intercom
       - script.execute: flush_signaling
       - script.execute: resolve_selected_contact
       - component.update: call_state_text

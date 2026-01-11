@@ -22,7 +22,7 @@
 
 substitutions:
   name: intercom-living-room
-  friendly_name: Living Room Intercom
+  friendly_name: Hermes - Living Room
   p2p_port: "12345"
   signaling_port: "12350"
   signaling_broadcast: "192.168.1.255"
@@ -55,31 +55,40 @@ esphome:
   name: ${name}
   friendly_name: ${friendly_name}
   on_boot:
-    priority: 600
-    then:
-      - delay: 500ms  # Wait for I2C devices to stabilize
-      - light.turn_on:
-          id: backlight
-          brightness: 100%
-      - delay: 2s
-      - lambda: |-
-          // Extract HA IP from static_contacts[0] (format: "Name|IP")
-          if (id(static_contacts)[0] && id(static_contacts)[0][0]) {
-            std::string entry = id(static_contacts)[0];
-            size_t sep = entry.find('|');
-            if (sep != std::string::npos) {
-              id(ha_ip) = entry.substr(sep + 1);
+    - priority: 900  # Very early boot: enable display/touch power via GPIO expander
+      then:
+        - switch.turn_on: exp_pin0
+        - switch.turn_on: exp_pin1
+        - switch.turn_on: exp_pin2
+        - switch.turn_on: exp_pin6
+        - delay: 200ms
+    - priority: 600
+      then:
+        - delay: 500ms  # Wait for I2C devices to stabilize
+        - light.turn_on:
+            id: backlight
+            brightness: 100%
+        # Enable auto-answer since touch is not working
+        - switch.turn_on: auto_answer_switch
+        - delay: 2s
+        - lambda: |-
+            // Extract HA IP from static_contacts[0] (format: "Name|IP")
+            if (id(static_contacts)[0] && id(static_contacts)[0][0]) {
+              std::string entry = id(static_contacts)[0];
+              size_t sep = entry.find('|');
+              if (sep != std::string::npos) {
+                id(ha_ip) = entry.substr(sep + 1);
+              }
             }
-          }
-          // Restore speaker volume from saved state
-          float vol = 0.15 + (id(speaker_volume).state / 100.0) * 0.60;
-          id(es8311_dac).set_volume(vol);
-          // Restore mic gain from saved state
-          id(intercom).set_mic_gain((int)id(mic_gain).state);
-      # Resolve first contact at boot
-      - script.execute: resolve_selected_contact
-      # Initialize display to idle page
-      - script.execute: update_display_page
+            // Restore speaker volume from saved state
+            float vol = 0.15 + (id(speaker_volume).state / 100.0) * 0.60;
+            id(es8311_dac).set_volume(vol);
+            // Restore mic gain from saved state
+            id(intercom).set_mic_gain((int)id(mic_gain).state);
+        # Resolve first contact at boot
+        - script.execute: resolve_selected_contact
+        # Initialize display to idle page
+        - script.execute: update_display_page
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -239,6 +248,8 @@ display:
   - platform: qspi_dbi
     id: main_display
     model: custom
+    data_rate: 40MHz
+    spi_mode: mode0
     dimensions:
       width: 368
       height: 448
@@ -248,9 +259,17 @@ display:
     invert_colors: false
     update_interval: never
     init_sequence:
-      - [0x11, 0]
+      # SH8601 AMOLED initialization (matches Hermes working config)
+      - [0x11]         # Sleep out
       - delay 120ms
-      - [0x29, 0]
+      - [0x13]         # Normal display mode on
+      - [0x20]         # Inversion off
+      - [0x3A, 0x05]   # Pixel format 16-bit RGB565
+      - [0x29]         # Display on
+      - [0x53, 0x28]   # Brightness control on + display dimming
+      - [0x51, 0xFF]   # Brightness max (0xFF = brightest)
+      - [0x58, 0x00]   # Contrast enhancement off
+      - delay 10ms
     pages:
       # ----------------------------------------------------------------------
       # PAGE: IDLE - Black background (AMOLED power saving)

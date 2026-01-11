@@ -75,6 +75,12 @@ switch:
       name: "Echo Cancellation"
       icon: "mdi:ear-hearing"
 
+# Script to enable speaker for ringtone (extends base)
+script:
+  - id: !extend enable_speaker_for_ringtone
+    then:
+      - output.turn_on: speaker_enable
+
 # Other outputs
 output:
   # Speaker amplifier enable
@@ -143,16 +149,18 @@ spi:
 # since pages need device-specific content
 
 # ==============================================================================
-# TOUCHSCREEN (FT3168)
+# TOUCHSCREEN (FT3168) - DISABLED: Touch controller not responding on I2C
+# The FT3168 is not appearing at expected addresses (0x38, 0x14, 0x5D)
+# May need hardware investigation or different reset sequence
 # ==============================================================================
-touchscreen:
-  - platform: ft5x06
-    id: touch_screen
-    interrupt_pin: GPIO21
-    address: 0x38
-    on_touch:
-      - lambda: |-
-          ESP_LOGD("touch", "Touch at (%d, %d)", touch.x, touch.y);
+# touchscreen:
+#   - platform: ft5x06
+#     id: touch_screen
+#     address: 0x38
+#     interrupt_pin: GPIO21
+#     on_touch:
+#       - lambda: |-
+#           ESP_LOGW("touch", "Touch at (%d, %d)", touch.x, touch.y);
 
 # ==============================================================================
 # DISPLAY BACKLIGHT
@@ -197,35 +205,38 @@ light:
               duration: 500ms
 
 # ==============================================================================
-# PHYSICAL CONTROLS
+# PHYSICAL CONTROLS - Touch disabled until FT3168 issue is resolved
 # ==============================================================================
-binary_sensor:
-  # Touch input (tap on display acts as button)
-  - platform: touchscreen
-    touchscreen_id: touch_screen
-    id: touch_button
-    name: "Touch Button"
-    internal: true
-    x_min: 0
-    x_max: 368
-    y_min: 350
-    y_max: 448
-    on_press:
-      then:
-        - button.press: call_button
-
-  # Long touch for next contact (hold bottom of screen)
-  - platform: touchscreen
-    touchscreen_id: touch_screen
-    id: touch_long
-    internal: true
-    x_min: 0
-    x_max: 368
-    y_min: 0
-    y_max: 100
-    on_press:
-      then:
-        - button.press: next_contact_button
+# binary_sensor:
+#   # Touch input (tap on display acts as button)
+#   - platform: touchscreen
+#     touchscreen_id: touch_screen
+#     id: touch_button
+#     name: "Touch Button"
+#     internal: true
+#     x_min: 0
+#     x_max: 368
+#     y_min: 350
+#     y_max: 448
+#     on_press:
+#       then:
+#         - logger.log:
+#             level: WARN
+#             format: "Touch button pressed! Calling call_button..."
+#         - button.press: call_button
+#
+#   # Long touch for next contact (hold bottom of screen)
+#   - platform: touchscreen
+#     touchscreen_id: touch_screen
+#     id: touch_long
+#     internal: true
+#     x_min: 0
+#     x_max: 368
+#     y_min: 0
+#     y_max: 100
+#     on_press:
+#       then:
+#         - button.press: next_contact_button
 
 # ==============================================================================
 # NUMBER CONTROLS

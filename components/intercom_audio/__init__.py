@@ -41,6 +41,8 @@ IntercomAudio = intercom_audio_ns.class_("IntercomAudio", cg.Component)
 StartAction = intercom_audio_ns.class_("StartAction", automation.Action)
 StopAction = intercom_audio_ns.class_("StopAction", automation.Action)
 ResetCountersAction = intercom_audio_ns.class_("ResetCountersAction", automation.Action)
+PlayRingtoneAction = intercom_audio_ns.class_("PlayRingtoneAction", automation.Action)
+StopRingtoneAction = intercom_audio_ns.class_("StopRingtoneAction", automation.Action)
 
 # Forward declare esp_aec if available
 esp_aec_ns = cg.esphome_ns.namespace("esp_aec")
@@ -206,6 +208,26 @@ async def stop_action_to_code(config, action_id, template_arg, args):
     cv.GenerateID(): cv.use_id(IntercomAudio),
 }))
 async def reset_counters_action_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    return var
+
+
+# Action: play ringtone
+@automation.register_action("intercom_audio.play_ringtone", PlayRingtoneAction, cv.Schema({
+    cv.GenerateID(): cv.use_id(IntercomAudio),
+}))
+async def play_ringtone_action_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    return var
+
+
+# Action: stop ringtone
+@automation.register_action("intercom_audio.stop_ringtone", StopRingtoneAction, cv.Schema({
+    cv.GenerateID(): cv.use_id(IntercomAudio),
+}))
+async def stop_ringtone_action_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
     await cg.register_parented(var, config[CONF_ID])
     return var
