@@ -166,6 +166,9 @@ intercom_audio:
   buffer_size: 8192
   prebuffer_size: 2048
   on_start:
+    - logger.log:
+        level: WARN
+        format: "on_start: Enabling speaker amplifier"
     - output.turn_on: speaker_enable
     - lambda: 'id(call_state) = 3;'
     - component.update: call_state_text

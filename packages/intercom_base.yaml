@@ -701,6 +701,21 @@ button:
       - intercom_audio.reset_counters:
           id: intercom
 
+  # Test speaker - plays ringtone to verify audio output works
+  - platform: template
+    name: "Test Speaker"
+    icon: "mdi:speaker"
+    on_press:
+      - logger.log:
+          level: WARN
+          format: "Testing speaker - playing ringtone"
+      - script.execute: enable_speaker_for_ringtone
+      - intercom_audio.play_ringtone:
+          id: intercom
+      - delay: 3s
+      - intercom_audio.stop_ringtone:
+          id: intercom
+
   # Device restart
   - platform: restart
     name: "Restart"

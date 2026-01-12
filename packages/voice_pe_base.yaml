@@ -117,6 +117,15 @@ voice_kit:
   # XMOS firmware will be auto-updated if version mismatch detected
 
 # ==============================================================================
+# AIC3204 AUDIO DAC - REQUIRED for speaker output!
+# The AIC3204 must be initialized via I2C before audio will play
+# ==============================================================================
+audio_dac:
+  - platform: aic3204
+    id: aic3204_dac
+    i2c_id: i2c_bus
+
+# ==============================================================================
 # I2S AUDIO CONFIGURATION - Dual Bus Setup
 # Voice PE uses SEPARATE I2S interfaces for mic and speaker
 # ==============================================================================
@@ -126,7 +135,7 @@ i2s_audio:
     i2s_lrclk_pin: GPIO14
     i2s_bclk_pin: GPIO13
 
-  # Speaker output (ESP32 is MASTER)
+  # Speaker output (ESP32 is SLAVE - XMOS provides clock for both)
   - id: i2s_spk
     i2s_lrclk_pin: GPIO7
     i2s_bclk_pin: GPIO8
@@ -161,6 +170,7 @@ speaker:
     sample_rate: 48000  # Hardware rate (AIC3204)
     bits_per_sample: 32bit
     channel: stereo
+    i2s_mode: secondary  # ESP32 is slave - XMOS provides clock
     timeout: 100ms
     buffer_duration: 100ms
 
@@ -294,7 +304,7 @@ sensor:
         - lambda: |-
             ESP_LOGW("encoder", "Encoder value changed to: %.0f", x);
             float vol = x / 100.0f;
-            id(spk_aic3204).set_volume(vol);
+            id(aic3204_dac).set_volume(vol);
             id(speaker_volume).publish_state(x);
         # Show volume on LED ring
         - script.execute: show_volume_on_leds
@@ -330,7 +340,7 @@ binary_sensor:
     pin:
       number: GPIO3
       mode: INPUT_PULLUP
-      inverted: true
+      inverted: false
     on_press:
       then:
         - switch.turn_on: mic_mute_switch
@@ -370,7 +380,7 @@ number:
     set_action:
       - lambda: |-
           float vol = x / 100.0f;
-          id(spk_aic3204).set_volume(vol);
+          id(aic3204_dac).set_volume(vol);
           // Sync rotary encoder display
           id(volume_encoder).publish_state(x);
 
@@ -399,6 +409,13 @@ switch:
     icon: "mdi:led-on"
     pin: GPIO45
     restore_mode: ALWAYS_ON
+
+  # Speaker amplifier enable (for testing)
+  - platform: output
+    name: "Speaker Amp Test"
+    id: speaker_amp_test
+    output: speaker_enable_pin
+    icon: "mdi:amplifier"
 
   # Microphone mute (software, separate from hardware switch)
   # The intercom_audio component checks this state to decide whether to send audio

@@ -746,61 +746,89 @@ void IntercomAudio::generate_ringtone_() {
     return;
   }
 
-  // Generate a beep pattern: 200ms beep, 200ms silence, repeat 2x, then 400ms pause
-  // Total cycle: 1200ms (beep-pause-beep-pause-long_pause)
-  static const uint32_t BEEP_SAMPLES = SAMPLE_RATE / 5;      // 200ms = 3200 samples
-  static const uint32_t PAUSE_SAMPLES = SAMPLE_RATE / 5;     // 200ms
-  static const uint32_t LONG_PAUSE_SAMPLES = SAMPLE_RATE * 2 / 5;  // 400ms
-  static const uint32_t CYCLE_SAMPLES = (BEEP_SAMPLES + PAUSE_SAMPLES) * 2 + LONG_PAUSE_SAMPLES;
+  static uint32_t log_counter = 0;
+  if (log_counter++ % 100 == 0) {
+    ESP_LOGW(TAG, "Generating ringtone frame %d", log_counter);
+  }
 
-  // Generate one frame of audio (16ms = 256 samples)
-  static const size_t FRAME_SIZE = 256;
-  int16_t frame[FRAME_SIZE];
+  // For Voice PE speaker: generate at 48kHz stereo 32-bit
+  // For duplex (ES8311): generate at 16kHz mono 16-bit
+  static const uint32_t SPEAKER_RATE = 48000;
+  static const size_t SPEAKER_FRAME_SIZE = 512;  // ~10.6ms at 48kHz
+
+  // Generate a beep pattern: 200ms beep, 200ms silence, repeat 2x, then 400ms pause
+  static const uint32_t BEEP_SAMPLES_48K = SPEAKER_RATE / 5;      // 200ms at 48kHz
+  static const uint32_t PAUSE_SAMPLES_48K = SPEAKER_RATE / 5;
+  static const uint32_t LONG_PAUSE_SAMPLES_48K = SPEAKER_RATE * 2 / 5;
+  static const uint32_t CYCLE_SAMPLES_48K = (BEEP_SAMPLES_48K + PAUSE_SAMPLES_48K) * 2 + LONG_PAUSE_SAMPLES_48K;
 
   // Frequency: 800Hz for a pleasant ring tone
   static const float FREQ = 800.0f;
   static const float TWO_PI = 6.28318530718f;
-  static const float AMPLITUDE = 16000.0f;  // ~50% of max amplitude
-
-  for (size_t i = 0; i < FRAME_SIZE; i++) {
-    uint32_t pos = (this->ringtone_phase_ + i) % CYCLE_SAMPLES;
-
-    // Determine if we're in a beep or silence period
-    bool in_beep = false;
-    if (pos < BEEP_SAMPLES) {
-      in_beep = true;  // First beep
-    } else if (pos >= BEEP_SAMPLES + PAUSE_SAMPLES &&
-               pos < 2 * BEEP_SAMPLES + PAUSE_SAMPLES) {
-      in_beep = true;  // Second beep
-    }
-
-    if (in_beep) {
-      // Generate sine wave
-      float t = static_cast<float>(this->ringtone_phase_ + i) / SAMPLE_RATE;
-      frame[i] = static_cast<int16_t>(AMPLITUDE * sinf(TWO_PI * FREQ * t));
-    } else {
-      frame[i] = 0;
-    }
-  }
-
-  this->ringtone_phase_ = (this->ringtone_phase_ + FRAME_SIZE) % (CYCLE_SAMPLES * 1000);  // Avoid overflow
+  static const float AMPLITUDE = 0.5f;  // 50% amplitude
 
   // Play to speaker
 #ifdef USE_I2S_AUDIO_DUPLEX
   if (this->duplex_ != nullptr) {
+    // Duplex mode: 16kHz mono 16-bit
+    static const size_t FRAME_SIZE = 256;
+    int16_t frame[FRAME_SIZE];
+    static const uint32_t BEEP_SAMPLES = SAMPLE_RATE / 5;
+    static const uint32_t PAUSE_SAMPLES = SAMPLE_RATE / 5;
+    static const uint32_t LONG_PAUSE_SAMPLES = SAMPLE_RATE * 2 / 5;
+    static const uint32_t CYCLE_SAMPLES = (BEEP_SAMPLES + PAUSE_SAMPLES) * 2 + LONG_PAUSE_SAMPLES;
+
+    for (size_t i = 0; i < FRAME_SIZE; i++) {
+      uint32_t pos = (this->ringtone_phase_ + i) % CYCLE_SAMPLES;
+      bool in_beep = (pos < BEEP_SAMPLES) ||
+                     (pos >= BEEP_SAMPLES + PAUSE_SAMPLES && pos < 2 * BEEP_SAMPLES + PAUSE_SAMPLES);
+      if (in_beep) {
+        float t = static_cast<float>(this->ringtone_phase_ + i) / SAMPLE_RATE;
+        frame[i] = static_cast<int16_t>(AMPLITUDE * 32767.0f * sinf(TWO_PI * FREQ * t));
+      } else {
+        frame[i] = 0;
+      }
+    }
+    this->ringtone_phase_ = (this->ringtone_phase_ + FRAME_SIZE) % (CYCLE_SAMPLES * 1000);
     this->duplex_->play(reinterpret_cast<uint8_t *>(frame), FRAME_SIZE * sizeof(int16_t));
     return;
   }
 #endif
 #ifdef USE_SPEAKER
   if (this->speaker_ != nullptr) {
-    // For speaker component, we need to set the audio info first if not streaming
+    // Speaker mode: 48kHz stereo 32-bit (Voice PE native format)
     if (!this->is_streaming()) {
-      audio::AudioStreamInfo info(16, 1, SAMPLE_RATE);  // bits, channels, rate
+      static bool logged_start = false;
+      if (!logged_start) {
+        ESP_LOGW(TAG, "Starting speaker for ringtone (48kHz stereo 32-bit)");
+        logged_start = true;
+      }
+      audio::AudioStreamInfo info(32, 2, SPEAKER_RATE);
       this->speaker_->set_audio_stream_info(info);
       this->speaker_->start();
     }
-    this->speaker_->play(reinterpret_cast<uint8_t *>(frame), FRAME_SIZE * sizeof(int16_t));
+
+    // Generate 48kHz stereo 32-bit audio directly
+    static int32_t stereo_frame[SPEAKER_FRAME_SIZE * 2];
+    for (size_t i = 0; i < SPEAKER_FRAME_SIZE; i++) {
+      uint32_t pos = (this->ringtone_phase_ + i) % CYCLE_SAMPLES_48K;
+      bool in_beep = (pos < BEEP_SAMPLES_48K) ||
+                     (pos >= BEEP_SAMPLES_48K + PAUSE_SAMPLES_48K && pos < 2 * BEEP_SAMPLES_48K + PAUSE_SAMPLES_48K);
+      int32_t sample = 0;
+      if (in_beep) {
+        float t = static_cast<float>(this->ringtone_phase_ + i) / SPEAKER_RATE;
+        sample = static_cast<int32_t>(AMPLITUDE * 2147483647.0f * sinf(TWO_PI * FREQ * t));
+      }
+      stereo_frame[i * 2] = sample;      // Left
+      stereo_frame[i * 2 + 1] = sample;  // Right
+    }
+    this->ringtone_phase_ = (this->ringtone_phase_ + SPEAKER_FRAME_SIZE) % (CYCLE_SAMPLES_48K * 1000);
+
+    size_t written = this->speaker_->play(reinterpret_cast<uint8_t *>(stereo_frame), SPEAKER_FRAME_SIZE * 2 * sizeof(int32_t));
+    if (log_counter % 100 == 1) {
+      ESP_LOGW(TAG, "Ringtone: wrote %zu/%zu bytes to speaker, running=%d",
+               written, SPEAKER_FRAME_SIZE * 2 * sizeof(int32_t), this->speaker_->is_running());
+    }
   }
 #endif
 }

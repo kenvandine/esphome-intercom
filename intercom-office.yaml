@@ -78,15 +78,17 @@ esphome:
                 id(ha_ip) = entry.substr(sep + 1);
               }
             }
-            // Restore speaker volume from saved state
+            // Restore speaker volume from saved state (set on DAC, not speaker)
             float vol = id(speaker_volume).state / 100.0f;
-            id(spk_aic3204).set_volume(vol);
+            id(aic3204_dac).set_volume(vol);
             // Restore mic gain from saved state
             id(intercom).set_mic_gain((int)id(mic_gain).state);
         # Resolve first contact at boot
         - script.execute: resolve_selected_contact
         # Initialize LED ring
         - script.execute: init_led_ring
+        # Enable auto-answer
+        - switch.turn_on: auto_answer_switch
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -122,7 +124,9 @@ web_server:
 
 logger:
   hardware_uart: USB_SERIAL_JTAG
-  level: INFO
+  level: DEBUG
+  logs:
+    intercom_audio: DEBUG
 
 wifi:
   ssid: !secret wifi_ssid
@@ -169,6 +173,9 @@ intercom_audio:
   buffer_size: 8192
   prebuffer_size: 2048
   on_start:
+    - logger.log:
+        level: WARN
+        format: "on_start: Enabling speaker amplifier"
     - output.turn_on: speaker_enable_pin
     - lambda: 'id(call_state) = 3;'
     - component.update: call_state_text
